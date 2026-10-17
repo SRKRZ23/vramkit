@@ -40,10 +40,23 @@ Per-token int8/int4 quantization (handles KV's outlier-channel structure), optio
 | int4 per-token (naive) | 3.88× | 0.958 | 0.29 |
 | **int4 + int8 outliers (4 ch)** | **3.66×** | **0.9989** | 0.046 |
 
-**Headline:** int8 KV = ~2× at >0.999 fidelity (essentially free). Naive int4 loses quality on KV's
-**outlier channels**; keeping just 4 of 128 channels in int8 (**outlier-aware int4**) recovers cos-sim
-0.958 → **0.999** at nearly int4 memory — the real engineering win. A range-coder on the int4 symbols
-adds further lossless shrink (exploitable redundancy survives quantization).
+**Headline:** int8 KV = ~2× at >0.999 cos-sim. Naive int4 loses quality on KV's **outlier channels**;
+keeping 4 of 128 channels in int8 (**outlier-aware int4**) recovers cos-sim 0.958 → 0.999 at ~int4
+memory. A range-coder on the int4 symbols adds further lossless shrink.
+
+**End-task validation — real perplexity, measured on a MacBook** (`bench/validate_ppl_mac.py`,
+Qwen2.5-0.5B, KV compression applied to every layer's K/V via forward hooks):
+
+| mode | Δ perplexity vs fp32 KV |
+|---|---|
+| **int8** | **+0.02%** (end-task near-lossless ✅) |
+| outlier-int4 | +9.5% |
+| naive int4 | +16.7% |
+
+**int8 KV is genuinely near-free on the end task** (+0.02% perplexity, 2× smaller) — this is the
+result to ship. Honest finding: **cos-sim overstated int4 quality** — perplexity is the metric that
+counts, and outlier-int4 still regresses ~9.5%, so it's a work-in-progress (better per-head/grouped
+scales + the range coder are the next levers). Reporting the correction, not hiding it.
 
 ## Use it — drop-in KV compression (PyTorch, ROCm/CUDA/MPS/CPU)
 
