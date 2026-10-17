@@ -23,8 +23,12 @@ on its left + up neighbours) — structure byte-oriented compressors (zstd/xz) c
 | **vramkit (2-D ctx)** | **2.676** | **−33.1%** |
 
 **Lossless (bit-exact verified), −33% vs raw 4-bit, and beats zstd-19 by 1.5% / xz-9e by 1.2% on
-real quantized LLM weights** — sitting on the 2-D entropy floor. (On synthetic low-rank data the edge
-is smaller, ~0.6%, since there's less structure; the real-weights number is the one that counts.)
+real quantized LLM weights** — sitting on the 2-D entropy floor.
+
+Across **every weight-tensor type** of Qwen2.5-0.5B (q/k/v/o-proj, mlp gate/down), it averages
+**2.92 bits/weight, −27% vs raw 4-bit**, lossless, beating zstd-19 on 4 of 5 — so it's a general
+property of quantized LLM weights, not one lucky tensor. (On synthetic low-rank data the edge over
+zstd is smaller since there's less structure; the real-weights number is the one that counts.)
 
 ### 2. KV-cache compression — quantize + entropy-code
 Per-token int8/int4 quantization (handles KV's outlier-channel structure), optionally range-coded.
@@ -40,6 +44,25 @@ Per-token int8/int4 quantization (handles KV's outlier-channel structure), optio
 **outlier channels**; keeping just 4 of 128 channels in int8 (**outlier-aware int4**) recovers cos-sim
 0.958 → **0.999** at nearly int4 memory — the real engineering win. A range-coder on the int4 symbols
 adds further lossless shrink (exploitable redundancy survives quantization).
+
+## Use it — drop-in KV compression (PyTorch, ROCm/CUDA/MPS/CPU)
+
+`vramkit/kvquant.py` is a device-agnostic module — it runs on **AMD/ROCm** (where KV-cache is the
+long-context memory bottleneck), NVIDIA, Apple MPS, or CPU, since it's plain PyTorch:
+
+```python
+from vramkit.kvquant import quantize_kv, dequantize_kv
+packed  = quantize_kv(key, mode="outlier-int4")   # store this instead of fp16 (≈3.6× smaller)
+key_hat = dequantize_kv(packed)                    # reconstruct in the attention path
+```
+`python3 vramkit/kvquant.py` → int8 1.97× @ cos-sim 0.99985, outlier-int4 3.66× @ 0.99872 (parity
+with the numpy benchmark). Modes: `int8` | `int4` | `outlier-int4`.
+
+## Why AMD / ROCm
+On ROCm, long-context inference is a known pain point (the default attention path degrades hard past
+~64k context, and FP8-KV support is still maturing). KV-cache memory is the lever: shrinking it 2–3.6×
+means more concurrent requests or longer context per Instinct/Radeon GPU — directly closing the gap
+with NVIDIA on $/token. vramkit is pure PyTorch + numpy, so it drops straight into a ROCm stack.
 
 ## Status (honest)
 - ✅ Range coder: pure-stdlib, bit-exact roundtrip verified on random + real quantized data.
