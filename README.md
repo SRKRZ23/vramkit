@@ -30,19 +30,22 @@ Per-token int8/int4 quantization (handles KV's outlier-channel structure), optio
 |---|---|---|---|
 | fp16 (baseline) | 1.00× | 1.000000 | 0.0 |
 | **int8 per-token** | **1.97×** | **0.9998** | 0.019 |
-| int4 per-token | 3.88× | 0.958 | 0.29 |
-| int4 + range-coder (lossless on top) | up to ~12× | 0.958 | 0.29 |
+| int4 per-token (naive) | 3.88× | 0.958 | 0.29 |
+| **int4 + int8 outliers (4 ch)** | **3.66×** | **0.9989** | 0.046 |
 
-**Headline: int8 KV = ~2× smaller at >0.999 fidelity** (essentially free). int4 trades quality on
-outlier-heavy data → motivates outlier-aware int4 (a real open problem). The range-coder step proves
-exploitable redundancy survives quantization.
+**Headline:** int8 KV = ~2× at >0.999 fidelity (essentially free). Naive int4 loses quality on KV's
+**outlier channels**; keeping just 4 of 128 channels in int8 (**outlier-aware int4**) recovers cos-sim
+0.958 → **0.999** at nearly int4 memory — the real engineering win. A range-coder on the int4 symbols
+adds further lossless shrink (exploitable redundancy survives quantization).
 
 ## Status (honest)
 - ✅ Range coder: pure-stdlib, bit-exact roundtrip verified on random + real quantized data.
 - ✅ Weight codec: −22% vs raw-4bit, lossless, beats zstd/xz, runs in ~2s on a MacBook.
-- ✅ KV-cache int8: ~2× at near-perfect fidelity. int4+coder: large ratio, quality TBD on a real model.
-- ⏳ Next: validate KV quality as **perplexity on a real model** (needs a GPU — dgx-spark); outlier-aware
-  int4; a GPU dequant kernel so the compressed form is used live, not just stored.
+- ✅ KV-cache: int8 ~2× near-lossless; outlier-aware int4 3.66× at cos-sim 0.999 — all measured.
+- Built and benchmarked **entirely on a MacBook (Apple Silicon)** — no datacenter GPU needed to
+  reproduce the numbers.
+- ⏳ Next (Mac-runnable): validate KV quality as **perplexity on a real small model via MLX**;
+  push outlier-aware int4 lower; a Metal/ROCm dequant kernel so the compressed form is used live.
 
 ## Layout
 - `vramkit/rangecoder.py` — the entropy coder (encoder + decoder + self-test).

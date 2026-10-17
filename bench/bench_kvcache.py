@@ -27,6 +27,28 @@ def quant_per_token(kv, bits):
     deq = (q.astype(np.float32) - half) * scale
     return q, deq, scale
 
+def quant_outlier_aware_int4(kv, outlier_frac=1/32):
+    """Keep the few outlier channels in int8, quantize the rest to int4.
+    Real KV has persistent massive-activation channels that wreck a shared int4 scale."""
+    seq, heads, dim = kv.shape
+    chan_max = np.abs(kv).max(axis=(0, 1))          # per-channel max abs
+    k = max(1, int(dim * outlier_frac))
+    outlier_ch = np.argsort(chan_max)[-k:]
+    mask = np.zeros(dim, bool); mask[outlier_ch] = True
+    recon = np.empty_like(kv)
+    # int4 for normal channels
+    normal = kv[:, :, ~mask]
+    qn, deqn, sn = quant_per_token(normal, 4)
+    recon[:, :, ~mask] = deqn
+    # int8 for outlier channels
+    outl = kv[:, :, mask]
+    qo, deqo, so = quant_per_token(outl, 8)
+    recon[:, :, mask] = deqo
+    n = kv.size
+    bytes_ = (normal.size * 4 / 8 + outl.size * 8 / 8
+              + sn.size * 2 + so.size * 2 + k * 2)   # +scales +outlier index
+    return recon, bytes_, k
+
 def fidelity(orig, recon):
     a = orig.reshape(-1); b = recon.reshape(-1)
     cos = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
@@ -71,8 +93,15 @@ def main():
                   % ("int4 + range-coder (lossless)", int(full_coded), fp16_bytes / full_coded, cos, rel))
             print("   (int4 symbols coded at %.3f bits/elem, bit-exact verified)" % coded_bpe)
 
-    print("\nTakeaway: int4 per-token KV quant = ~3.9x smaller than fp16 at cos-sim >0.99;")
-    print("range-coding the int4 symbols adds a further lossless shrink. Next: perplexity on a real model (GPU).")
+    # outlier-aware int4: int8 for outlier channels, int4 for the rest
+    recon, obytes, k = quant_outlier_aware_int4(kv)
+    cos, rel = fidelity(kv, recon)
+    print("%-34s %12d %7.2fx %9.6f %9.4f"
+          % ("int4 + int8 outliers (%d ch)" % k, int(obytes), fp16_bytes / obytes, cos, rel))
+
+    print("\nTakeaway: int8 KV = ~2x near-lossless; naive int4 loses quality on outlier channels,")
+    print("but OUTLIER-AWARE int4 (int8 for a few massive-activation channels) recovers cos-sim ~1.0")
+    print("at nearly int4 memory. Next: perplexity on a real model (GPU, dgx-spark).")
 
 if __name__ == "__main__":
     main()
