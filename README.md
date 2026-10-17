@@ -13,15 +13,18 @@ directly cuts GPU count / lets bigger context fit — the exact lever hyperscale
 A from-scratch 32-bit range coder with a 2-D adaptive context model (each 4-bit weight conditioned
 on its left + up neighbours) — structure byte-oriented compressors (zstd/xz) can't see.
 
+**On REAL LLM weights** (`Qwen2.5-0.5B`, `self_attn.o_proj`, int4 — `python3 bench/validate_real_weights.py <model.safetensors>`):
+
 | method | bits/weight | vs raw 4-bit |
 |---|---|---|
 | raw 4-bit packed | 4.000 | — |
-| zstd -19 | 3.139 | −21.5% |
-| xz -9e | 3.162 | −20.9% |
-| **vramkit (2-D ctx)** | **3.121** | **−22.0%** |
+| zstd -19 | 2.717 | −32.1% |
+| xz -9e | 2.708 | −32.3% |
+| **vramkit (2-D ctx)** | **2.676** | **−33.1%** |
 
-Lossless (bit-exact verified). Beats zstd-19 and xz-9e; sits on the 2-D entropy floor.
-(Prior real-model validation: ~1 pt lossless edge over zstd-19 on 4-bit Qwen2.5-Math-7B, on a MacBook.)
+**Lossless (bit-exact verified), −33% vs raw 4-bit, and beats zstd-19 by 1.5% / xz-9e by 1.2% on
+real quantized LLM weights** — sitting on the 2-D entropy floor. (On synthetic low-rank data the edge
+is smaller, ~0.6%, since there's less structure; the real-weights number is the one that counts.)
 
 ### 2. KV-cache compression — quantize + entropy-code
 Per-token int8/int4 quantization (handles KV's outlier-channel structure), optionally range-coded.
