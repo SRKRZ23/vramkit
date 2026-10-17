@@ -32,3 +32,21 @@ verified, built on a MacBook. Published to AMD Dev Community + LinkedIn.
 - [[redirect-unwinnable-pursuit-to-buildable-asset]] — when a user is in a desperate loop chasing an
   impossible/illegitimate money path, prove the walls with DATA, hold the ethics line, and redirect
   the same drive into a legitimate buildable asset in their real skill domain.
+
+## KV-cache compression — CORRECTED final (commit c3dcca5)
+The quant AXIS is the whole game. Keys have persistent per-channel outliers → quantize keys
+PER-CHANNEL (scale per feature dim across tokens), values PER-TOKEN. Real perplexity, Qwen2.5-0.5B,
+every layer, 4 windows of diverse prose (baseline ppl ~18):
+
+| scheme | mem | Δ perplexity |
+|---|---|---|
+| int8 per-token K&V (naive) | 2.0x | +4.6% |
+| int8 per-CHANNEL K + per-token V | 2.0x | +0.1% (near-lossless) |
+| int8 K(per-chan) + int4 V(per-tok) | 2.67x | +1.4% |
+| int4 per-channel K + per-token V | 4.0x | +25.6% |
+
+int4 is values-only. Per-channel key quant is KIVI-aligned; streaming decode needs token-group
+quantization. This replaced the "outlier-aware int4" mode (a patch for the wrong per-token axis).
+Two methodology lessons: (1) cos-sim overstates quality (0.0002 cos gap = 4.5% ppl); (2) a repetitive
+eval corpus makes perplexity meaningless + non-monotonic — always use diverse prose, multiple windows.
+Reproduce: `python3 bench/validate_ppl_mac.py`.
