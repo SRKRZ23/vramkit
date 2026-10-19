@@ -39,6 +39,10 @@ def main():
     ap.add_argument("--text", default=None, help="path to a plain-text corpus (else downloads a book)")
     ap.add_argument("--ntok", type=int, default=1024)
     ap.add_argument("--windows", type=int, default=4)
+    ap.add_argument("--keys", choices=["pre", "post", "both"], default="both",
+                    help="quantize keys before RoPE (k_proj output) or after RoPE "
+                         "(what a standard transformers KV cache stores)")
+    ap.add_argument("--threads", type=int, default=4)
     args = ap.parse_args()
 
     import torch
@@ -46,6 +50,7 @@ def main():
     from vramkit.kvquant import quantize_kv, dequantize_kv
 
     torch.manual_seed(0)
+    torch.set_num_threads(args.threads)
     tok = AutoTokenizer.from_pretrained(args.model, cache_dir=args.cache)
     model = AutoModelForCausalLM.from_pretrained(args.model, cache_dir=args.cache,
                                                  torch_dtype=torch.float32).eval()
@@ -61,12 +66,12 @@ def main():
                for w in range(args.windows)]
 
     # kind -> callable(reshaped (b,s,heads,head_dim) fp32 tensor); keys per-channel, values per-token.
-    STATE = {"k": None, "v": None}
+    STATE = {"k": None, "v": None, "where": "pre"}
 
     def mkhook(kind):
         def hook(module, inp, out):
             fn = STATE[kind]
-            if fn is None:
+            if fn is None or (kind == "k" and STATE["where"] != "pre"):
                 return out
             b, s, d = out.shape
             heads = d // head_dim
@@ -79,6 +84,22 @@ def main():
             mod.register_forward_hook(mkhook("k"))
         elif name.endswith("v_proj"):
             mod.register_forward_hook(mkhook("v"))
+
+    # Post-RoPE keys: wrap the model module's apply_rotary_pos_emb (looked up at call time),
+    # so the rotated keys — exactly what past_key_values.update() stores — get quantized.
+    import importlib
+    mm = importlib.import_module(type(model).__module__)
+    _rope = mm.apply_rotary_pos_emb
+
+    def rope_q(q, k, cos, sin, *a, **kw):
+        q2, k2 = _rope(q, k, cos, sin, *a, **kw)
+        fn = STATE["k"]
+        if fn is not None and STATE["where"] == "post":
+            STATE["post_calls"] = STATE.get("post_calls", 0) + 1
+            # (b, heads, s, head_dim) -> (b, s, heads, head_dim) so the same fn/axes apply
+            k2 = fn(k2.transpose(1, 2).to(torch.float32)).transpose(1, 2).to(k2.dtype)
+        return q2, k2
+    mm.apply_rotary_pos_emb = rope_q
 
     def ppl(ids):
         with torch.no_grad():
@@ -99,12 +120,20 @@ def main():
     bases = [ppl(w) for w in windows]
     print("\nbaseline fp32-KV ppl per window:", ["%.2f" % b for b in bases],
           "(mean %.2f)" % (sum(bases) / len(bases)))
-    print("\n%-38s %-7s %s" % ("config", "mem", "mean Δ perplexity vs fp32 KV"))
-    for label, kf, vf, mem in CONFIGS:
-        STATE["k"], STATE["v"] = kf, vf
-        d = [(ppl(w) - b) / b * 100 for w, b in zip(windows, bases)]
-        print("%-38s %-7s %+.2f%%  %s" % (label, mem, sum(d) / len(d),
-                                          "[" + " ".join("%+.1f" % x for x in d) + "]"))
+    wheres = ["pre", "post"] if args.keys == "both" else [args.keys]
+    for where in wheres:
+        STATE["where"] = where
+        print("\nkeys quantized %s-RoPE%s" % (where, "  (= standard transformers cache)" if where == "post" else ""))
+        print("%-38s %-7s %s" % ("config", "mem", "mean Δ perplexity vs fp32 KV"))
+        for label, kf, vf, mem in CONFIGS:
+            STATE["k"], STATE["v"] = kf, vf
+            d = [(ppl(w) - b) / b * 100 for w, b in zip(windows, bases)]
+            print("%-38s %-7s %+.2f%%  %s" % (label, mem, sum(d) / len(d),
+                                              "[" + " ".join("%+.1f" % x for x in d) + "]"), flush=True)
+    STATE["k"] = STATE["v"] = None
+    if "post" in wheres:
+        # guard against a silent no-op patch (post results would then equal the baseline)
+        print("\npost-RoPE key quantizer calls: %d (must be > 0)" % STATE.get("post_calls", 0))
     print("\nTakeaway: per-CHANNEL key quantization makes int8 KV near-lossless (~0%) at 2x;")
     print("the naive per-token scheme costs ~4%. int4 values are usable (~1-2% at 2.67x);")
     print("int4 keys still regress. cos-sim overstated all of this — perplexity is the truth.")

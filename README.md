@@ -42,12 +42,21 @@ scale (one per feature dim, across tokens) fixes it. Values are well-behaved per
 Qwen2.5-0.5B, KV compression applied to **every** layer's K/V via forward hooks, averaged over 4
 disjoint windows of real prose, baseline perplexity ≈ 18):
 
-| scheme | memory | Δ perplexity vs fp32 KV |
-|---|---|---|
-| int8, per-token K & V (the naive way) | 2.0× | **+4.6%** |
-| **int8, per-CHANNEL K + per-token V** | **2.0×** | **+0.1%  (near-lossless ✅)** |
-| int8 K (per-chan) + int4 V (per-token) | 2.67× | +1.4% |
-| int4, per-CHANNEL K + per-token V | 4.0× | +25.6% |
+| scheme | memory | Δ ppl, keys pre-RoPE | Δ ppl, keys post-RoPE (standard cache) |
+|---|---|---|---|
+| int8, per-token K & V (the naive way) | 2.0× | **+4.6%** | +3.7% |
+| **int8, per-CHANNEL K + per-token V** | **2.0×** | **+0.10%  (near-lossless ✅)** | **+0.13% ✅** |
+| int8 K (per-chan) + int4 V (per-token) | 2.67× | +1.4% | +1.6% |
+| int4, per-CHANNEL K + per-token V | 4.0× | +25.6% | +27.4% |
+
+**Pre- vs post-RoPE keys** (`--keys both`, thanks to Hakob Arzumanyan on the AMD Developer Community
+for catching it): hooking `k_proj` quantizes keys *before* RoPE, but a standard transformers cache
+stores them *after* RoPE (`past_key_values.update` receives rotated keys). The post-RoPE column
+quantizes exactly what the cache stores (the model's `apply_rotary_pos_emb` is wrapped; the script
+prints the call count so a silent no-op can't pass as "lossless"). int8 per-channel keys hold in both
+places (+0.10% vs +0.13%), so the 2× result applies to a drop-in post-RoPE cache. At int4, pre-RoPE is
+slightly better (+25.6% vs +27.4%), consistent with KVQuant's choice to cache pre-RoPE keys — but int4
+keys regress either way.
 
 **The whole game is the key axis.** Per-channel int8 keys make the KV cache 2× smaller for **+0.1%
 perplexity** — genuinely near-free. The naive per-token scheme most quick implementations reach for
